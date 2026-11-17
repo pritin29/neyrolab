@@ -1,0 +1,492 @@
+"""
+Консольный калькулятор уравнений.
+Только стандартная библиотека Python — ничего устанавливать не нужно.
+Запуск: python calculator.py   (Python 3.8+)
+"""
+
+from fractions import Fraction
+from math import gcd, sqrt
+
+MAX_DEG = 24  # максимальная степень многочлена
+
+
+class CalcError(Exception):
+    """Ошибка с понятным сообщением для пользователя."""
+
+
+# ------------------------- Разбор строки -------------------------
+
+def tokenize(s):
+    s = ''.join(s.lower().split())
+    for a, b in (('х', 'x'), ('**', '^'), (',', '.'), ('÷', '/'),
+                 ('−', '-'), ('·', '*'), ('×', '*')):
+        s = s.replace(a, b)
+    tokens, i = [], 0
+    while i < len(s):
+        ch = s[i]
+        if ch.isdigit() or ch == '.':
+            j = i
+            while j < len(s) and (s[j].isdigit() or s[j] == '.'):
+                j += 1
+            text = s[i:j]
+            try:
+                tokens.append(('num', Fraction(text)))
+            except (ValueError, ZeroDivisionError):
+                raise CalcError(f"некорректное число '{text}'")
+            i = j
+        elif ch == 'x':
+            tokens.append(('x', None)); i += 1
+        elif ch in '+-*/^()=':
+            tokens.append((ch, None)); i += 1
+        else:
+            raise CalcError(f"непонятный символ '{ch}' "
+                            "(доступны числа, x, + - * / ^ и скобки)")
+    return tokens
+
+
+# ------------- Многочлены: список коэффициентов, [c0, c1, c2, ...] -------------
+
+def trim(p):
+    p = list(p)
+    while len(p) > 1 and p[-1] == 0:
+        p.pop()
+    return p
+
+
+def deg(p):
+    return len(trim(p)) - 1
+
+
+def padd(a, b):
+    n = max(len(a), len(b))
+    return trim([(a[i] if i < len(a) else Fraction(0)) +
+                 (b[i] if i < len(b) else Fraction(0)) for i in range(n)])
+
+
+def pneg(a):
+    return [-c for c in a]
+
+
+def psub(a, b):
+    return padd(a, pneg(b))
+
+
+def pmul(a, b):
+    if len(a) + len(b) - 2 > MAX_DEG:
+        raise CalcError(f"степень многочлена не должна превышать {MAX_DEG}")
+    r = [Fraction(0)] * (len(a) + len(b) - 1)
+    for i, ca in enumerate(a):
+        for j, cb in enumerate(b):
+            r[i + j] += ca * cb
+    return trim(r)
+
+
+def pdiv(a, b):
+    b = trim(b)
+    if deg(b) > 0:
+        raise CalcError("деление на выражение с x не поддерживается (нужен многочлен)")
+    if b[0] == 0:
+        raise CalcError("деление на ноль")
+    return trim([c / b[0] for c in a])
+
+
+def ppow(base, exp):
+    base, exp = trim(base), trim(exp)
+    if deg(exp) > 0:
+        raise CalcError("в показателе степени не должно быть x")
+    e = exp[0]
+    if deg(base) == 0:  # число в числовой степени
+        b = base[0]
+        if e.denominator == 1:
+            n = int(e)
+            if abs(n) > 1000:
+                raise CalcError("слишком большая степень")
+            if b == 0 and n < 0:
+                raise CalcError("ноль в отрицательной степени")
+            return [b ** n]
+        if b < 0:
+            raise CalcError("отрицательное число в дробной степени не поддерживается")
+        return [Fraction(str(float(b) ** float(e)))]
+    if e.denominator != 1 or e < 0:
+        raise CalcError("степень выражения с x должна быть целым числом ≥ 0")
+    n = int(e)
+    if n > MAX_DEG:
+        raise CalcError(f"степень не должна превышать {MAX_DEG}")
+    r = [Fraction(1)]
+    for _ in range(n):
+        r = pmul(r, base)
+    return r
+
+
+def peval(p, x):
+    r = Fraction(0)
+    for c in reversed(p):
+        r = r * x + c
+    return r
+
+
+# ------------------------- Парсер (рекурсивный спуск) -------------------------
+
+class Parser:
+    def __init__(self, tokens):
+        self.t, self.i = tokens, 0
+
+    def peek(self):
+        return self.t[self.i][0] if self.i < len(self.t) else None
+
+    def next(self):
+        tok = self.t[self.i]; self.i += 1
+        return tok
+
+    def parse(self):
+        p = self.expr()
+        if self.peek() is not None:
+            raise CalcError(f"лишний символ '{self.peek()}' — проверьте запись")
+        return p
+
+    def expr(self):                      # сумма / разность
+        p = self.term()
+        while self.peek() in ('+', '-'):
+            op = self.next()[0]
+            q = self.term()
+            p = padd(p, q) if op == '+' else psub(p, q)
+        return p
+
+    def term(self):                      # произведение / деление (+ неявное: 2x, 3(x+1))
+        p = self.unary()
+        while True:
+            nxt = self.peek()
+            if nxt in ('*', '/'):
+                self.next()
+                q = self.unary()
+                p = pmul(p, q) if nxt == '*' else pdiv(p, q)
+            elif nxt in ('num', 'x', '('):
+                p = pmul(p, self.unary())
+            else:
+                break
+        return p
+
+    def unary(self):                     # унарный плюс / минус
+        if self.peek() in ('+', '-'):
+            op = self.next()[0]
+            p = self.unary()
+            return p if op == '+' else pneg(p)
+        return self.power()
+
+    def power(self):                     # степень (правоассоциативная)
+        base = self.atom()
+        if self.peek() == '^':
+            self.next()
+            return ppow(base, self.unary())
+        return base
+
+    def atom(self):                      # число | x | (выражение)
+        tok = self.peek()
+        if tok == 'num':
+            return [self.next()[1]]
+        if tok == 'x':
+            self.next()
+            return [Fraction(0), Fraction(1)]
+        if tok == '(':
+            self.next()
+            p = self.expr()
+            if self.peek() != ')':
+                raise CalcError("не закрыта скобка '('")
+            self.next()
+            return p
+        raise CalcError("ожидалось число, x или '('" +
+                        (f" вместо '{tok}'" if tok else " — выражение оборвано"))
+
+
+# ------------------------- Форматирование -------------------------
+
+def fmt_frac(f):
+    return str(f.numerator) if f.denominator == 1 else f"{f.numerator}/{f.denominator}"
+
+
+def fmt_float(v, digits=10):
+    if abs(v) < 1e-12:
+        v = 0.0
+    return f"{v:.{digits}g}"
+
+
+def fmt_complex(re, im):
+    if abs(re) < 1e-10:
+        return f"{'-' if im < 0 else ''}{fmt_float(abs(im))}i"
+    return f"{fmt_float(re)} {'+' if im >= 0 else '-'} {fmt_float(abs(im))}i"
+
+
+def show_number(f):
+    if f.denominator == 1:
+        return str(f.numerator)
+    if f.denominator > 10**6:
+        return f"≈ {fmt_float(float(f))}"
+    return f"{fmt_frac(f)} (≈ {fmt_float(float(f), 6)})"
+
+
+def sub(n):
+    return ''.join('₀₁₂₃₄₅₆₇₈₉'[int(d)] for d in str(n))
+
+
+def poly_str(p):
+    p = trim(p)
+    if deg(p) == 0:
+        return fmt_frac(p[0])
+    parts = []
+    for k in range(len(p) - 1, -1, -1):
+        c = p[k]
+        if c == 0:
+            continue
+        a = abs(c)
+        if k == 0:
+            body = fmt_frac(a)
+        else:
+            xpart = 'x' if k == 1 else f'x^{k}'
+            body = xpart if a.numerator == 1 else f'{a.numerator}{xpart}'
+            if a.denominator != 1:
+                body += f'/{a.denominator}'
+        if not parts:
+            parts.append(('-' if c < 0 else '') + body)
+        else:
+            parts.append(f" {'-' if c < 0 else '+'} {body}")
+    return ''.join(parts)
+
+
+def sqrt_simplify(n):
+    """n > 0, целое. Возвращает (k, m): √n = k·√m."""
+    k, m, i = 1, n, 2
+    while i * i <= m and i < 100000:
+        while m % (i * i) == 0:
+            m //= i * i
+            k *= i
+        i += 1
+    return k, m
+
+
+def to_int_coeffs(p):
+    """Многочлен с дробными коэффициентами -> целые (без общего делителя)."""
+    d = 1
+    for c in p:
+        d = d * c.denominator // gcd(d, c.denominator)
+    ints = [int(c * d) for c in p]
+    g = 0
+    for c in ints:
+        g = gcd(g, c)
+    if g > 1:
+        ints = [c // g for c in ints]
+    if ints[-1] < 0:
+        ints = [-c for c in ints]
+    return ints
+
+
+# ------------------------- Решение уравнений -------------------------
+
+def solve_quadratic(a, b, c):
+    D = b * b - 4 * a * c
+    out = [f"Квадратное уравнение: a={a}, b={b}, c={c}",
+           f"D = b² − 4ac = {D}"]
+    if D == 0:
+        out.append("D = 0 → один корень (двукратный):")
+        out.append(f"  x = {show_number(Fraction(-b, 2 * a))}")
+    elif D > 0:
+        out.append("D > 0 → два действительных корня:")
+        k, m = sqrt_simplify(D)
+        if m == 1:  # корень из D извлекается нацело
+            x1, x2 = sorted([Fraction(-b - k, 2 * a), Fraction(-b + k, 2 * a)])
+            out.append(f"  x₁ = {show_number(x1)}")
+            out.append(f"  x₂ = {show_number(x2)}")
+        else:       # точный ответ с радикалом + приближение
+            g = gcd(gcd(abs(b), k), abs(2 * a))
+            p0, kk, den = -b // g, k // g, (2 * a) // g
+            if den < 0:
+                p0, den = -p0, -den
+            rad = f"√{m}" if kk == 1 else f"{kk}√{m}"
+            inner = f"{p0} ± {rad}" if p0 != 0 else f"± {rad}"
+            out.append(f"  x = {inner if den == 1 else f'({inner})/{den}'}")
+            sd = sqrt(D)
+            r1, r2 = sorted([(-b - sd) / (2 * a), (-b + sd) / (2 * a)])
+            out.append(f"  x₁ ≈ {fmt_float(r1)}")
+            out.append(f"  x₂ ≈ {fmt_float(r2)}")
+    else:
+        out.append("D < 0 → два комплексных корня:")
+        re = Fraction(-b, 2 * a)
+        k, m = sqrt_simplify(-D)
+        if m == 1:
+            q = fmt_frac(abs(Fraction(k, 2 * a)))
+            qpart = "i" if q == "1" else f"{q}·i"
+        else:
+            g2 = gcd(k, abs(2 * a))
+            kn, dn = k // g2, abs(2 * a) // g2
+            rad = f"√{m}" if kn == 1 else f"{kn}√{m}"
+            qpart = (rad if dn == 1 else f"{rad}/{dn}") + "·i"
+        out.append(f"  x = {'± ' + qpart if re == 0 else fmt_frac(re) + ' ± ' + qpart}")
+        imf = abs(sqrt(-D) / (2 * a))
+        out.append(f"  x₁ ≈ {fmt_complex(float(re), -imf)}")
+        out.append(f"  x₂ ≈ {fmt_complex(float(re), imf)}")
+    return out
+
+
+def durand_kerner(desc):
+    """Все корни многочлена (коэффициенты от старшего к младшему), метод Дюрана–Кернера."""
+    n = len(desc) - 1
+    lead = complex(desc[0])
+    cs = [complex(c) / lead for c in desc]
+    roots = [(0.4 + 0.9j) ** k for k in range(n)]
+    for _ in range(1000):
+        shift = 0.0
+        for i in range(n):
+            val = cs[0]
+            for c in cs[1:]:
+                val = val * roots[i] + c
+            den = 1 + 0j
+            for j in range(n):
+                if j != i:
+                    den *= roots[i] - roots[j]
+            if abs(den) < 1e-300:
+                den = 1e-300 + 0j
+            d = val / den
+            roots[i] -= d
+            shift = max(shift, abs(d))
+        if shift < 1e-14:
+            break
+    return roots
+
+
+def newton_polish(asc, x):
+    """Уточнение действительного корня методом Ньютона."""
+    for _ in range(60):
+        f, df = 0.0, 0.0
+        for c in reversed(asc):
+            df = df * x + f
+            f = f * x + c
+        if df == 0:
+            break
+        step = f / df
+        x -= step
+        if abs(step) < 1e-15 * max(1.0, abs(x)):
+            break
+    return x
+
+
+def solve_high(p):
+    n = deg(p)
+    ints = to_int_coeffs(p)
+    asc = [float(c) for c in ints]
+    roots = durand_kerner(asc[::-1])
+    real, comp = [], []
+    for z in roots:
+        if abs(z.imag) <= 1e-5 * max(1.0, abs(z)):
+            real.append(newton_polish(asc, z.real))
+        else:
+            comp.append(z)
+    real.sort()
+    groups = []  # объединяем близкие корни -> кратность
+    for r in real:
+        if groups and abs(r - groups[-1][0]) <= 1e-6 * max(1.0, abs(r)):
+            groups[-1][1] += 1
+        else:
+            groups.append([r, 1])
+    out = [f"Уравнение степени {n} — решаю численно (метод Дюрана–Кернера)."]
+    i = 1
+    for r, mult in groups:
+        cand = Fraction(r).limit_denominator(10000)
+        val = show_number(cand) if peval(p, cand) == 0 else f"≈ {fmt_float(r)}"
+        line = f"  x{sub(i)} = {val}"
+        if mult > 1:
+            line += f"  (кратность {mult})"
+        out.append(line)
+        i += 1
+    comp.sort(key=lambda z: (z.real, z.imag))
+    for z in comp:
+        out.append(f"  x{sub(i)} ≈ {fmt_complex(z.real, z.imag)}")
+        i += 1
+    if comp:
+        out.append("  (это комплексные корни)")
+    if any(m > 1 for _, m in groups):
+        out.append("  Примечание: кратные корни вычисляются приближённо.")
+    return out
+
+
+def solve_equation(text):
+    if text.count('=') != 1:
+        raise CalcError("в уравнении должен быть ровно один знак '='")
+    left, right = text.split('=')
+    if not left.strip() or not right.strip():
+        raise CalcError("пустая часть уравнения")
+    pl = Parser(tokenize(left)).parse()
+    pr = Parser(tokenize(right)).parse()
+    p = trim(psub(pl, pr))
+    out = [f"Приведённый вид: {poly_str(p)} = 0"]
+    d = deg(p)
+    if d == 0:
+        out.append("Ответ: бесконечно много решений (любое x)." if p[0] == 0
+                   else "Ответ: решений нет (получилось неверное равенство).")
+    elif d == 1:
+        out.append("Линейное уравнение.")
+        out.append(f"Ответ: x = {show_number(-p[0] / p[1])}")
+    elif d == 2:
+        c, b, a = to_int_coeffs(p)
+        out += solve_quadratic(a, b, c)
+    else:
+        out += solve_high(p)
+    return out
+
+
+def simplify_expression(text):
+    p = trim(Parser(tokenize(text)).parse())
+    if deg(p) == 0:
+        return [f"Результат: {show_number(p[0])}"]
+    return [f"Упрощённое выражение: {poly_str(p)}"]
+
+
+# ------------------------- Консольный интерфейс -------------------------
+
+HELP = """
+Справка:
+  • Уравнение вводите со знаком '=':   3x - 7 = 2   или   x^2 = 5
+  • Выражение без '=' будет упрощено:  (x+2)^2 - x^2
+  • Переменная — x (можно русскую «х»), степень — x^3, дроби — 0.5 или 1/2
+  • Неявное умножение: 2x, 3(x+1), (x+1)(x-2)
+  • Линейные и квадратные — точно (в т.ч. комплексные корни),
+    степени 3 и выше — численно (рациональные корни распознаются точно)
+  • Не поддерживаются: sin/cos/log, sqrt(x), 1/x — только многочлены
+Команды: help — справка, exit — выход
+"""
+
+
+def main():
+    print("=== Калькулятор уравнений (без внешних библиотек) ===")
+    print("Примеры: 2x + 3 = 7 | x^2 - 5x + 6 = 0 | (x+1)^2 = 4")
+    print("Введите уравнение или выражение. help — справка, exit — выход.")
+    while True:
+        try:
+            s = input("\n> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nПока!")
+            break
+        if not s:
+            continue
+        low = s.lower()
+        if low in ('exit', 'quit', 'q', 'выход', 'выйти'):
+            print("Пока!")
+            break
+        if low in ('help', '?', 'справка', 'помощь'):
+            print(HELP)
+            continue
+        try:
+            lines = solve_equation(s) if '=' in s else simplify_expression(s)
+        except CalcError as e:
+            print(f"Ошибка: {e}")
+        except ZeroDivisionError:
+            print("Ошибка: деление на ноль")
+        except RecursionError:
+            print("Ошибка: слишком сложное выражение")
+        except (OverflowError, ValueError):
+            print("Ошибка: слишком большие числа или недопустимая операция")
+        else:
+            for line in lines:
+                print(line)
+
+
+if __name__ == "__main__":
+    main()
