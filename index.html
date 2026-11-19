@@ -1,17 +1,55 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Кликер</title>
-<link rel="stylesheet" href="style.css">
-<script src="main.js" defer></script>
+    <title>Монетный Кликер</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="main.js" defer></script>
 </head>
-<body>
-  <main class = "game">
-    <h1>Кристальная шахта</h1>
-    <p>Кристалы: <span id="score">0</span></p>
-    <button id="mine">Добыть кристалл</button>
-  </main>
+<body data-theme="classic">
+
+    <div class="game">
+        <!-- Шапка со статистикой -->
+        <header class="header">
+            <h1>🪙 Монетный Кликер</h1>
+            <div class="stats">
+                <div class="stat">
+                    <span class="stat-label">Монеты</span>
+                    <span class="stat-value" id="coins">0</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">За клик</span>
+                    <span class="stat-value" id="per-click">1</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">В секунду</span>
+                    <span class="stat-value" id="per-sec">0</span>
+                </div>
+            </div>
+            <div class="controls">
+                <button id="save" class="ctrl-btn">💾 Сохранить</button>
+                <button id="reset" class="ctrl-btn danger">🗑 Сброс</button>
+            </div>
+        </header>
+
+        <!-- Зона клика -->
+        <section class="click-zone">
+            <button id="coin" class="coin-btn">🪙</button>
+            <p class="hint">Кликай по монете!</p>
+        </section>
+
+        <!-- Магазин с вкладками -->
+        <section class="shop">
+            <div class="tabs">
+                <button class="tab active" data-tab="upgrades">⚡ Улучшения</button>
+                <button class="tab" data-tab="themes">🎨 Темы</button>
+            </div>
+
+            <div id="upgrades" class="shop-list"></div>
+            <div id="themes" class="shop-list hidden"></div>
+        </section>
+    </div>
+
 </body>
 </html>
